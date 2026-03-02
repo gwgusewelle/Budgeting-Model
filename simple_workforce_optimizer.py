@@ -4,7 +4,7 @@ import pulp
 
 # ─── PAGE CONFIG ──────────────────────────────────────────────────────────────
 # Set the browser tab title, icon, and use full-width layout
-st.set_page_config(page_title="Workforce Optimizer", page_icon="⚡", layout="wide")
+st.set_page_config(page_title="Workforce Optimizer", layout="wide")
 
 # ─── SIDEBAR WIDTH ────────────────────────────────────────────────────────────
 # Streamlit's default sidebar max-width is ~350px which clips longer labels.
