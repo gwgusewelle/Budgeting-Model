@@ -1,4 +1,3 @@
-
 import streamlit as st
 import pandas as pd
 import pulp
@@ -392,207 +391,6 @@ def run_optimizer(employees, tasks, projects):
     }
 
 
-# ─── DEPARTURE ANALYSIS ───────────────────────────────────────────────────────
-# Simulates the impact of a specific employee leaving by:
-#  1. Running the optimizer without that employee
-#  2. Checking which of their formerly-owned tasks can be re-covered
-#  3. Ranking remaining employees as replacement candidates
-def analyze_departure(leaving_id, employees, tasks, projects):
-    # Run baseline to find what the departing employee currently owns
-    baseline    = run_optimizer(employees, tasks, projects)
-    base_asgn   = baseline["asgn"]
-    leaving_emp = next((e for e in employees if e["id"] == leaving_id), None)
-    if not leaving_emp:
-        return None
-
-    # Tasks the departing employee is the primary owner of
-    owned      = [t for t in tasks if base_asgn.get(t["id"], {}).get("employee") == leaving_id]
-    need_skills = list(set(t["type"] for t in owned))
-    total_h    = sum(t["minHours"] for t in owned)
-
-    # Re-run optimizer excluding the departing employee
-    rest       = [e for e in employees if e["id"] != leaving_id]
-    new_result = run_optimizer(rest, tasks, projects)
-    n_asgn     = new_result["asgn"]
-    n_load     = new_result["load"]
-
-    # Check coverage status for each previously-owned task
-    plan = []
-    for t in owned:
-        a      = n_asgn.get(t["id"], {})
-        status = (
-            "ok"         if a.get("employee") and not a.get("partial")
-            else "overloaded" if a.get("partial")
-            else "failed"
-        )
-        plan.append({"task": t, "newOwner": a.get("employee"), "status": status})
-
-    # Score remaining employees as replacement candidates
-    cands = []
-    for e in rest:
-        overlap  = [s for s in need_skills if s in e["skills"]]
-        sc       = len(overlap) / max(len(need_skills), 1)
-        free     = e["capacity"] - (n_load.get(e["id"]) or 0)
-        can_all  = free >= total_h
-        cr       = min(free / total_h, 1) if total_h > 0 else 1
-        score    = sc * 0.6 + cr * 0.3 + (0.1 if can_all else 0)
-        if sc > 0:
-            cands.append({"e": e, "overlap": overlap, "sc": sc,
-                          "free": free, "canAll": can_all, "score": score})
-    cands = sorted(cands, key=lambda x: -x["score"])[:5]
-
-    return {
-        "leaving":    leaving_emp,
-        "owned":      owned,
-        "needSkills": need_skills,
-        "totalH":     total_h,
-        "cands":      cands,
-        "plan":       plan,
-    }
-
-
-# ─── EMERGENCY COVERAGE ANALYSIS ─────────────────────────────────────────────
-# Identifies tasks disrupted when one or more employees are marked absent.
-# Re-runs the optimizer without those employees and reports auto-coverage and gaps.
-def analyze_emergency(absent_ids, employees, tasks, projects):
-    if not absent_ids:
-        return None
-
-    proj_map   = {p["id"]: p for p in projects}
-
-    # Baseline assignment to find which tasks the absent employees own
-    baseline   = run_optimizer(employees, tasks, projects)
-    base_asgn  = baseline["asgn"]
-
-    avail      = [e for e in employees if e["id"] not in absent_ids]
-    disrupted  = [t for t in tasks if base_asgn.get(t["id"], {}).get("employee") in absent_ids]
-
-    # Re-run without absent employees
-    new_result = run_optimizer(avail, tasks, projects)
-    n_asgn     = new_result["asgn"]
-    n_load     = new_result["load"]
-
-    # Build substitution map: auto-covered vs. needs manual assignment
-    sub_map = {}
-    for t in disrupted:
-        a = n_asgn.get(t["id"], {})
-        if a.get("employee") and not a.get("partial"):
-            sub_map[t["id"]] = {"autoSub": a["employee"]}
-        else:
-            # Rank available employees as manual sub candidates
-            cands = []
-            for e in avail:
-                if t["type"] in e["skills"]:
-                    free       = e["capacity"] - (n_load.get(e["id"]) or 0)
-                    util_after = ((n_load.get(e["id"]) or 0) + t["minHours"]) / e["capacity"] * 100
-                    cands.append({"e": e, "free": free,
-                                  "canTake": free >= t["minHours"],
-                                  "utilAfter": util_after})
-            cands = sorted(cands, key=lambda x: (-(1 if x["canTake"] else 0), -x["free"]))[:3]
-            sub_map[t["id"]] = {"autoSub": None, "cands": cands}
-
-    auto_cov = sum(1 for s in sub_map.values() if s.get("autoSub"))
-
-    # Summarize skill gaps created by the absences
-    gaps = {}
-    for e in employees:
-        if e["id"] in absent_ids:
-            for sk in e["skills"]:
-                if sk not in gaps:
-                    gaps[sk] = {"lost": 0, "lostH": 0, "remain": 0, "demH": 0}
-                gaps[sk]["lost"]  += 1
-                gaps[sk]["lostH"] += e["capacity"]
-    for sk in gaps:
-        gaps[sk]["remain"] = len([e for e in avail if sk in e["skills"]])
-        gaps[sk]["demH"]   = sum(t["minHours"] for t in disrupted if t["type"] == sk)
-
-    # Group disrupted tasks by project for priority display
-    urg_proj = {}
-    for t in disrupted:
-        pid = t["project"]
-        if pid not in urg_proj:
-            urg_proj[pid] = {"proj": proj_map[pid], "tasks": [], "total": 0, "risk": 0, "cov": 0}
-        urg_proj[pid]["tasks"].append(t)
-        urg_proj[pid]["total"] += t["minHours"]
-        if sub_map.get(t["id"], {}).get("autoSub"):
-            urg_proj[pid]["cov"] += 1
-        else:
-            urg_proj[pid]["risk"] += 1
-
-    return {
-        "absentEmps": [e for e in employees if e["id"] in absent_ids],
-        "disrupted":  disrupted,
-        "urgProj":    urg_proj,
-        "subMap":     sub_map,
-        "gaps":       gaps,
-        "autoCov":    auto_cov,
-        "total":      len(disrupted),
-    }
-
-
-# ─── SKILL GAP ANALYSIS ───────────────────────────────────────────────────────
-# Compares the total hours demanded across all tasks of each skill type
-# against the available capacity of employees who hold that skill.
-# Flags skill types as surplus / healthy / tight / critical.
-def analyze_skill_gap(employees, tasks, projects):
-    skill_types  = sorted(set(t["type"] for t in tasks))
-    total_demand = {s: 0 for s in skill_types}
-    total_supply = {s: 0 for s in skill_types}
-    emp_count    = {s: 0 for s in skill_types}
-
-    for t in tasks:
-        total_demand[t["type"]] += t["minHours"]
-    for e in employees:
-        for s in e["skills"]:
-            if s in total_supply:
-                total_supply[s] += e["capacity"]
-                emp_count[s]    += 1
-
-    opt = run_optimizer(employees, tasks, projects)
-
-    results = []
-    for skill in skill_types:
-        dem      = total_demand[skill]
-        sup      = total_supply.get(skill, 0)
-        gap      = dem - sup
-        ratio    = dem / sup if sup > 0 else 99
-        coverage = min(sup / dem, 1) * 100 if dem > 0 else 100
-        status   = (
-            "surplus"  if ratio <= 0.6
-            else "healthy"  if ratio <= 1.0
-            else "tight"    if ratio <= 1.3
-            else "critical"
-        )
-        hours_short  = max(0, gap)
-        hires_needed = max(0, -(-hours_short // 30)) if hours_short > 0 else 0
-
-        # Find employees who could be trained in this skill (have bandwidth and <3 skills)
-        can_learn = []
-        for e in employees:
-            if skill not in e["skills"] and len(e["skills"]) < 3:
-                free = e["capacity"] - (opt["load"].get(e["id"]) or 0)
-                if free >= 5:
-                    can_learn.append({"e": e, "free": free})
-        can_learn = sorted(can_learn, key=lambda x: -x["free"])[:3]
-
-        results.append({
-            "skill":       skill,
-            "dem":         dem,
-            "sup":         sup,
-            "gap":         gap,
-            "ratio":       ratio,
-            "coverage":    coverage,
-            "status":      status,
-            "hoursShort":  hours_short,
-            "hiresNeeded": hires_needed,
-            "canLearn":    can_learn,
-            "empCount":    emp_count.get(skill, 0),
-        })
-
-    overall_ok = all(r["status"] in ("healthy", "surplus") for r in results)
-    return {"results": results, "overallOk": overall_ok}
-
-
 # ─── STYLE HELPER ─────────────────────────────────────────────────────────────
 # Maps status strings to emoji-colored labels for consistent UI display
 def status_badge(status):
@@ -636,12 +434,27 @@ with st.sidebar:
 
     st.divider()
 
+    # ── Downloadable reference guide (.docx) ──
+    try:
+        with open("/sessions/gracious-friendly-keller/mnt/Optimizer/workforce_optimizer_guide.docx", "rb") as f:
+            guide_bytes = f.read()
+        st.download_button(
+            label="⬇ Download reference guide (.docx)",
+            data=guide_bytes,
+            file_name="workforce_optimizer_guide.docx",
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            use_container_width=True,
+        )
+    except Exception:
+        st.caption("Reference guide unavailable.")
+
+    st.divider()
+
     uploaded_file = st.file_uploader(
         label="Choose Excel file (.xlsx)",
         type=["xlsx"],
         help="File must contain sheets: Employees, Projects, Tasks",
     )
-
 
 
 # ─── GUARD: require upload before anything else runs ─────────────────────────
@@ -688,8 +501,10 @@ if st.session_state.get("_cache_key") != cache_key:
         opt_result = run_optimizer(EMPLOYEES, TASKS, PROJECTS)
     st.session_state["opt_result"]  = opt_result
     st.session_state["_cache_key"] = cache_key
+else:
+    opt_result = st.session_state["opt_result"]
 
-opt_result = st.session_state["opt_result"]
+# Extract optimization results and build convenience lookups
 asgn       = opt_result["asgn"]
 load       = opt_result["load"]
 p_hours    = opt_result["p_hours"]
@@ -714,17 +529,13 @@ for t in TASKS:
     if a.get("employee"):
         tasks_by_emp[a["employee"]].append({**t, **a})
 
-# Run skill gap analysis (uses optimizer internally)
-skill_gap_data = analyze_skill_gap(EMPLOYEES, TASKS, PROJECTS)
-critical_gaps  = [r for r in skill_gap_data["results"] if r["status"] in ("critical", "tight")]
-
 
 # ─── TOP METRICS ──────────────────────────────────────────────────────────────
 # Three headline KPIs shown above the tabs for a quick status read
 col1, col2, col3 = st.columns(3)
 col1.metric("Utilization",   f"{util}%")
 col2.metric("Tasks Covered", f"{n_ok} / {len(TASKS)}")
-col3.metric("Skill Alerts",  len(critical_gaps))
+col3.metric("Unfilled",      f"{n_fail + n_part}")
 
 # Surface the LP solver status in case the model is infeasible or unbounded
 solver_status = opt_result.get("status", "Unknown")
@@ -736,9 +547,7 @@ st.divider()
 
 # ─── TABS ─────────────────────────────────────────────────────────────────────
 tab_labels = [
-    "📊 Dashboard", "👥 Employees", "📁 Projects",
-    "📋 Assignments", "🎯 Skill Gap Advisor",
-    "👤 Departure Planner", "🚨 Emergency Coverage",
+    "📊 Dashboard", "👥 Employees", "📁 Projects", "📋 Assignments",
 ]
 tabs = st.tabs(tab_labels)
 
@@ -805,9 +614,6 @@ with tabs[0]:
             "Coverage %", min_value=0, max_value=100, format="%d%%"
         )},
     )
-
-    if critical_gaps:
-        st.warning(f"⚠ {len(critical_gaps)} skill(s) under pressure — see **Skill Gap Advisor** for recommendations.")
 
     # Project summary table including dollar budget tracking
     st.subheader("Project Summary")
@@ -897,6 +703,60 @@ with tabs[2]:
                     min(cost / p["budget"], 1.0),
                     text=f"Wage budget: ${cost:,.0f} / ${p['budget']:,.0f}",
                 )
+
+            # ── Cost Breakdown section ──
+            st.markdown("##### 💰 Cost Breakdown")
+            cost_rows = []
+            project_tasks = [t for t in TASKS if t["project"] == p["id"]]
+            for t in project_tasks:
+                a = asgn.get(t["id"], {})
+                emp_id = a.get("employee")
+                if emp_id:
+                    emp = next((e for e in EMPLOYEES if e["id"] == emp_id), None)
+                    if emp:
+                        hrs = a.get("hours", 0)
+                        task_cost = round(hrs * emp["rate"], 2)
+                        cost_rows.append({
+                            "Employee": emp_id,
+                            "Tasks Assigned": 1,
+                            "Hours": round(hrs, 1),
+                            "Rate ($/h)": f"${emp['rate']:.2f}",
+                            "Cost ($)": f"${task_cost:,.2f}",
+                        })
+            
+            # Aggregate by employee
+            if cost_rows:
+                cost_df = pd.DataFrame(cost_rows)
+                agg_rows = []
+                for emp_id in cost_df["Employee"].unique():
+                    emp_data = cost_df[cost_df["Employee"] == emp_id]
+                    total_tasks = len(emp_data)
+                    total_hours = emp_data["Hours"].sum()
+                    emp_rate = emp_data["Rate ($/h)"].iloc[0]
+                    emp_cost = round(total_hours * float(emp_rate.strip("$")), 2)
+                    agg_rows.append({
+                        "Employee": emp_id,
+                        "Tasks Assigned": total_tasks,
+                        "Hours": round(total_hours, 1),
+                        "Rate ($/h)": emp_rate,
+                        "Cost ($)": f"${emp_cost:,.2f}",
+                    })
+                
+                # Add totals row
+                agg_rows.append({
+                    "Employee": "TOTAL",
+                    "Tasks Assigned": sum(r["Tasks Assigned"] for r in agg_rows),
+                    "Hours": round(sum(r["Hours"] for r in agg_rows), 1),
+                    "Rate ($/h)": "—",
+                    "Cost ($)": f"${cost:,.2f}",
+                })
+                
+                st.dataframe(pd.DataFrame(agg_rows), use_container_width=True, hide_index=True)
+            else:
+                st.caption("No tasks assigned to this project.")
+
+            # Task assignment details
+            st.markdown("##### Task Details")
             rows = []
             for t in pt:
                 a = asgn.get(t["id"], {})
@@ -921,6 +781,16 @@ with tabs[3]:
     rows = []
     for t in TASKS:
         a     = asgn.get(t["id"], {})
+        emp_id = a.get("employee")
+        
+        # Calculate cost for this task
+        cost_val = "—"
+        if emp_id:
+            emp = next((e for e in EMPLOYEES if e["id"] == emp_id), None)
+            if emp:
+                hrs = a.get("hours", 0)
+                cost_val = f"${round(hrs * emp['rate'], 2):,.2f}"
+        
         s_str = "Failed" if not a.get("employee") else ("Overloaded" if a.get("partial") else "OK")
         reimb = "R" if proj_map.get(t["project"], {}).get("reimbursable") else "N"
         rows.append({
@@ -930,362 +800,7 @@ with tabs[3]:
             "Min Hours":   t["minHours"],
             "Assigned Hrs":round(a.get("hours", 0), 1),
             "Assigned To": a.get("employee") or "—",
+            "Cost ($)":    cost_val,
             "Status":      status_badge(s_str),
         })
     st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-
-
-# ══════════════════════════════════════════════════════════════════ SKILL GAP
-with tabs[4]:
-    st.subheader("Skill Gap Advisor")
-    data = skill_gap_data
-
-    if data["overallOk"]:
-        st.success("Your current team's skill coverage is sufficient for all active projects.")
-    else:
-        st.error("Current skill supply cannot meet project demand. Immediate investment recommended.")
-
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Skills Healthy",   f"{sum(1 for r in data['results'] if r['status'] in ('healthy','surplus'))}/{len(data['results'])}")
-    c2.metric("Tight Supply",     sum(1 for r in data['results'] if r['status'] == 'tight'))
-    c3.metric("Critical Gaps",    sum(1 for r in data['results'] if r['status'] == 'critical'))
-    c4.metric("Est. Hires Needed",sum(r["hiresNeeded"] for r in data["results"]))
-
-    order = {"critical": 0, "tight": 1, "healthy": 2, "surplus": 3}
-    for r in sorted(data["results"], key=lambda x: order[x["status"]]):
-        icon = ("🔴" if r["status"] == "critical" else "🟡" if r["status"] == "tight"
-                else "🟢" if r["status"] == "healthy" else "⚪")
-        with st.expander(
-            f"{SKILL_COLORS.get(r['skill'], r['skill'])} **Skill {r['skill']}** — "
-            f"{icon} {r['status'].upper()} — {r['coverage']:.0f}% covered"
-        ):
-            c1, c2, c3, c4, c5 = st.columns(5)
-            c1.metric("Demand",    f"{r['dem']} h")
-            c2.metric("Supply",    f"{r['sup']} h")
-            c3.metric("Gap",       f"{'-' if r['gap'] > 0 else '+'}{abs(r['gap'])} h")
-            c4.metric("Employees", r["empCount"])
-            c5.metric("Coverage",  f"{r['coverage']:.0f}%")
-            st.progress(r["coverage"] / 100, text=f"Supply vs Demand: {r['coverage']:.0f}%")
-
-            if r["status"] in ("critical", "tight"):
-                col_a, col_b = st.columns(2)
-                with col_a:
-                    st.markdown("**Option A — Upskill Existing Staff**")
-                    if not r["canLearn"]:
-                        st.caption("No employees have bandwidth to learn this skill right now.")
-                    else:
-                        for c in r["canLearn"]:
-                            skills_str = " ".join(SKILL_COLORS.get(s, s) + s for s in c["e"]["skills"])
-                            st.caption(f"**{c['e']['id']}** ({skills_str}) — {c['free']} h free")
-                        total_free = sum(c["free"] for c in r["canLearn"])
-                        st.info(f"Training would add ~{total_free} h of Skill {r['skill']} capacity without new hires.")
-                with col_b:
-                    st.markdown("**Option B — Hire New Employee**")
-                    st.metric("Hours Short",       f"{r['hoursShort']} h")
-                    st.metric("Est. Hires Needed", r["hiresNeeded"], "@ avg 30 h/week")
-            elif r["status"] == "surplus":
-                st.caption(f"Surplus supply — consider reassigning some Skill {r['skill']} capacity to support tighter areas.")
-
-
-# ══════════════════════════════════════════════════════════════════ DEPARTURE
-with tabs[5]:
-    st.subheader("Departure Impact Planner")
-    st.info(
-        "Select an employee who is leaving. The engine analyzes their task portfolio, "
-        "identifies coverage gaps, and ranks the best internal replacements."
-    )
-
-    emp_options = ["— Select departing employee —"] + [
-        f"{e['id']} · {e.get('type','')} · Skills: {', '.join(e['skills'])} · {e['capacity']} h/week"
-        for e in EMPLOYEES
-    ]
-    selection = st.selectbox("Departing Employee", emp_options)
-
-    if selection != emp_options[0]:
-        dept_id = selection.split(" · ")[0]
-        if st.button("Analyze Departure"):
-            with st.spinner("Analyzing departure impact..."):
-                st.session_state["dept_result"] = analyze_departure(
-                    dept_id, EMPLOYEES, TASKS, PROJECTS
-                )
-
-    if "dept_result" in st.session_state and st.session_state["dept_result"]:
-        dr      = st.session_state["dept_result"]
-        leaving = dr["leaving"]
-        auto_ok = sum(1 for p in dr["plan"] if p["status"] == "ok")
-        at_risk = sum(1 for p in dr["plan"] if p["status"] != "ok")
-
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Tasks Owned",       len(dr["owned"]))
-        c2.metric("Hours to Cover",    f"{dr['totalH']} h")
-        c3.metric("Auto-Redistributed",auto_ok)
-        c4.metric("Needs Manual Cover",at_risk)
-
-        skills_str = " ".join(SKILL_COLORS.get(s, s) + s for s in leaving["skills"])
-        need_str   = " ".join(SKILL_COLORS.get(s, s) + s for s in dr["needSkills"])
-        st.markdown(f"**Departing:** {leaving['id']} ({leaving.get('type','')}) — "
-                    f"{skills_str} — ${leaving['rate']:.2f}/h — {leaving['capacity']} h/week capacity")
-        st.markdown(f"**Skills needed for coverage:** {need_str}")
-
-        if at_risk > 0:
-            st.error(f"{at_risk} task(s) cannot be auto-covered without a replacement.")
-
-        st.subheader("Top Replacement Candidates")
-        for i, c in enumerate(dr["cands"]):
-            label   = "Best Match" if i == 0 else f"#{i+1}"
-            c_skills = " ".join(SKILL_COLORS.get(s, s) + s for s in c["e"]["skills"])
-            with st.expander(f"{label} — **{c['e']['id']}** — {c_skills} — Score: {round(c['score']*100)}"):
-                col1, col2, col3, col4 = st.columns(4)
-                col1.metric("Skill Coverage", f"{round(c['sc']*100)}%")
-                col2.metric("Free Hours",     f"{c['free']} h")
-                col3.metric("Can Absorb All", "Yes" if c["canAll"] else "No")
-                col4.metric("Fit Score",       round(c["score"] * 100))
-                missing = [s for s in dr["needSkills"] if s not in c["e"]["skills"]]
-                if missing:
-                    st.warning(f"Missing skills: {', '.join(missing)} — additional resource needed.")
-
-        st.subheader("Task Redistribution Plan")
-        rows = [{
-            "Task":     p["task"]["id"],
-            "Project":  p["task"]["project"],
-            "Skill":    f"{SKILL_COLORS.get(p['task']['type'], p['task']['type'])} {p['task']['type']}",
-            "Hours":    p["task"]["minHours"],
-            "New Owner":p["newOwner"] or "—",
-            "Status":   status_badge("Reassigned" if p["status"] == "ok"
-                                     else p["status"].capitalize()),
-        } for p in dr["plan"]]
-        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-
-        if st.button("Clear Analysis"):
-            del st.session_state["dept_result"]
-            st.rerun()
-
-
-# ══════════════════════════════════════════════════════════════════ EMERGENCY
-with tabs[6]:
-    st.subheader("Emergency Coverage Planner")
-    st.error(
-        "Mark employees as absent (sick, unavailable). The engine instantly identifies "
-        "disrupted tasks and recommends the best available subs — reimbursable projects "
-        "are treated as highest priority."
-    )
-
-    absent_ids = st.multiselect(
-        "Mark Absent Employees",
-        options=[e["id"] for e in EMPLOYEES],
-        format_func=lambda eid: (
-            f"{eid} [{next(e for e in EMPLOYEES if e['id']==eid).get('type','')}] "
-            f"{next(e for e in EMPLOYEES if e['id']==eid)['skills']}"
-        ),
-    )
-
-    if absent_ids:
-        if st.button("Run Coverage Analysis"):
-            with st.spinner("Analyzing emergency coverage..."):
-                em_result = analyze_emergency(absent_ids, EMPLOYEES, TASKS, PROJECTS)
-            st.session_state["em_result"] = em_result
-
-    if "em_result" in st.session_state and st.session_state.get("em_result"):
-        em_result = st.session_state["em_result"]
-
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Employees Absent", len(em_result["absentEmps"]))
-        c2.metric("Tasks Disrupted",  em_result["total"])
-        c3.metric("Auto-Covered",     em_result["autoCov"])
-        at_risk_n = em_result["total"] - em_result["autoCov"]
-        c4.metric("Needs Manual Sub", at_risk_n)
-
-        if at_risk_n == 0:
-            st.success(f"All {em_result['total']} disrupted tasks can be auto-redistributed.")
-        else:
-            st.error(f"{at_risk_n} task(s) require manual reassignment. See recommendations below.")
-
-        # Skill gap impact from the absences
-        if em_result["gaps"]:
-            st.subheader("Skill Gap Impact")
-            gap_rows = [{
-                "Skill":                f"{SKILL_COLORS.get(sk, sk)} {sk}",
-                "Lost Employees":       g["lost"],
-                "Lost Hours":           g["lostH"],
-                "Remaining Employees":  g["remain"],
-                "At-Risk Demand (h)":   g["demH"],
-            } for sk, g in em_result["gaps"].items()]
-            st.dataframe(pd.DataFrame(gap_rows), use_container_width=True, hide_index=True)
-
-        # Affected projects sorted by priority (reimbursable first, then most at-risk)
-        if em_result["urgProj"]:
-            st.subheader("Affected Projects — Priority Order")
-            proj_rows = sorted(
-                [{
-                    "Project":     pid,
-                    "Type":        "🔵 Reimbursable · High Priority"
-                                   if info["proj"].get("reimbursable") else "🟣 Non-Reimbursable",
-                    "Tasks":       len(info["tasks"]),
-                    "Total (h)":   info["total"],
-                    "Auto-Covered":info["cov"],
-                    "At Risk":     info["risk"],
-                } for pid, info in em_result["urgProj"].items()],
-                key=lambda x: (0 if "Reimbursable" in x["Type"] else 1, -x["At Risk"]),
-            )
-            st.dataframe(pd.DataFrame(proj_rows), use_container_width=True, hide_index=True)
-
-        # Per-task substitution recommendations
-        st.subheader("Immediate Sub Recommendations")
-        disrupted_sorted = sorted(
-            em_result["disrupted"],
-            key=lambda t: (
-                -(1 if proj_map.get(t["project"], {}).get("reimbursable") else 0),
-                -t["minHours"],
-            ),
-        )
-        for t in disrupted_sorted:
-            sub      = em_result["subMap"].get(t["id"], {})
-            p        = proj_map.get(t["project"], {})
-            priority = "🔵 High Priority" if p.get("reimbursable") else "🟣 Standard"
-            auto     = sub.get("autoSub")
-            header   = (
-                f"**{t['id']}** — {SKILL_COLORS.get(t['type'], t['type'])} Skill {t['type']} "
-                f"— {t['project']} — {t['minHours']} h — {priority}"
-            )
-            header += f" — 🟢 Auto-assigned → {auto}" if auto else " — 🔴 Needs Manual Assignment"
-            with st.expander(header):
-                if not auto and sub.get("cands"):
-                    st.markdown("**Best Available Subs:**")
-                    for i, cand in enumerate(sub["cands"]):
-                        label     = "Top Pick" if i == 0 else f"#{i+1}"
-                        ok_label  = "No overload" if cand["canTake"] else "Slight overload"
-                        st.caption(
-                            f"{label} — **{cand['e']['id']}** — {cand['free']} h free "
-                            f"— {round(cand['utilAfter'])}% util after — {ok_label}"
-                        )
-                elif not auto:
-                    st.error(
-                        f"No available employees with Skill {t['type']} — "
-                        "consider external hire or deferral."
-                    )
-    elif not absent_ids:
-        st.caption("Select one or more absent employees above, then click Run Coverage Analysis.")
-
-
-# ─── BOTTOM OF PAGE: DATA REQUIREMENTS + METHODOLOGY ─────────────────────────
-# Shown below all tabs so it doesn't clutter the sidebar or the working area.
-# Both sections render as collapsed expanders by default.
-st.divider()
-
-# ── Data Requirements ──────────────────────────────────────────────────────────
-with st.expander("📋 Data requirements — click to expand"):
-    st.markdown("##### Employees sheet")
-    st.code("employee | capacity | skills | hourly_rate ($) | employee_type", language="text")
-    st.markdown("""
-| Column | Type | Notes |
-|--------|------|-------|
-| `employee` | Text | Unique ID, e.g. `E001` |
-| `capacity` | Integer | Max hours available per week |
-| `skills` | Text | Comma-separated skill types: `A`, `B`, `C`, `D`, or `E` — e.g. `A,B,C` |
-| `hourly_rate ($)` | Number | Billing/wage rate used in the budget constraint |
-| `employee_type` | Text | `Junior` / `Mid-Level` / `Senior` (display only) |
-""")
-    st.markdown("##### Projects sheet")
-    st.code("project | reimbursable | max_total | budget ($)", language="text")
-    st.markdown("""
-| Column | Type | Notes |
-|--------|------|-------|
-| `project` | Text | Unique ID, e.g. `P001` |
-| `reimbursable` | Boolean | `TRUE` = client-billable (gets higher optimization priority); `FALSE` = internal |
-| `max_total` | Integer | Hard cap on total hours billed. Leave blank for non-reimbursable projects. |
-| `budget ($)` | Number | Dollar ceiling. The optimizer will not assign more wage cost than this. |
-""")
-    st.markdown("##### Tasks sheet")
-    st.code("project | task_id | task_type | min_hours", language="text")
-    st.markdown("""
-| Column | Type | Notes |
-|--------|------|-------|
-| `project` | Text | Must exactly match a project ID in the Projects sheet |
-| `task_id` | Text | Unique task ID, e.g. `T001` |
-| `task_type` | Text | The skill required to perform this task (`A` / `B` / `C` / `D` / `E`) |
-| `min_hours` | Integer | Minimum hours the optimizer must try to cover |
-""")
-
-
-# ── Model Methodology ──────────────────────────────────────────────────────────
-with st.expander("📐 Model methodology — click to expand"):
-    st.markdown("#### What this optimizer is doing, in plain terms")
-    st.markdown("""
-The optimizer is solving a **Linear Programming (LP)** problem — a mathematical technique that
-finds the best possible answer to a resource allocation problem given a set of hard rules (constraints).
-
-**In plain terms:** it's trying to assign every task to the right employee in a way that covers as
-many hours as possible, without exceeding any employee's weekly availability, any project's hour cap,
-or any project's dollar budget. Reimbursable (client-billable) tasks are treated as higher priority
-than internal ones.
-
-Think of it like a scheduling puzzle: the optimizer is testing millions of possible combinations
-simultaneously and picking the one that leaves the fewest uncovered hours, while respecting every
-constraint at once.
-""")
-
-    st.markdown("#### The four rules (constraints)")
-    st.markdown("""
-**1. Employee capacity** — No employee can be assigned more hours than their stated weekly capacity.
-If someone has 35 hours available, the model will never try to give them 36.
-
-**2. Task demand** — Every task has a minimum number of hours it needs. The model tries to meet that
-minimum. If it can't (due to budget or skill gaps), it records the shortfall rather than pretending
-the task is covered.
-
-**3. Skill matching** — An employee can only be assigned to a task if they hold the required skill
-type. A Skill B task cannot be assigned to someone who only has Skills C and D.
-
-**4. Project budget ceiling** — For each project, the total wage cost of all hours assigned
-(hours × each employee's hourly rate) cannot exceed the project's dollar budget. This is the key
-financial constraint that links headcount decisions to real dollars.
-
-For reimbursable projects there is also a **project hour cap** (`max_total`) — a separate ceiling
-on the raw number of billable hours regardless of cost.
-""")
-
-    st.markdown("#### The objective — what the model is maximizing")
-    st.markdown("""
-The optimizer minimizes **uncovered (slack) hours** across all tasks, with reimbursable tasks
-weighted twice as heavily as internal tasks. This means when capacity is tight and trade-offs must
-be made, client-facing work is always covered first.
-""")
-
-    st.markdown("#### Equations")
-    st.latex(r"""
-\text{Minimize} \quad \sum_{j} w_j \cdot s_j
-""")
-    st.markdown("""where:
-- $j$ = a task
-- $s_j$ = uncovered (slack) hours for task $j$ — how many hours the model couldn't fill
-- $w_j = 2$ if the task belongs to a reimbursable project, $w_j = 1$ otherwise
-""")
-
-    st.latex(r"""
-\text{Subject to:}
-""")
-    st.markdown("**Employee capacity constraint** — for each employee $i$:")
-    st.latex(r"""
-\sum_{j} x_{ij} \leq \text{capacity}_i
-""")
-    st.markdown("**Task demand constraint** — for each task $j$:")
-    st.latex(r"""
-\sum_{i} x_{ij} + s_j \geq \text{minHours}_j
-""")
-    st.markdown("**Project hour cap** — for each reimbursable project $p$:")
-    st.latex(r"""
-\sum_{j \in p} \sum_{i} x_{ij} \leq \text{maxTotal}_p
-""")
-    st.markdown("**Project dollar budget** — for each project $p$:")
-    st.latex(r"""
-\sum_{j \in p} \sum_{i} x_{ij} \cdot \text{rate}_i \leq \text{budget}_p
-""")
-    st.markdown("**Skill matching and non-negativity:**")
-    st.latex(r"""
-x_{ij} = 0 \quad \text{if employee } i \text{ lacks the skill for task } j, \qquad x_{ij} \geq 0, \quad s_j \geq 0
-""")
-    st.markdown("""
-where $x_{ij}$ is the number of hours employee $i$ is assigned to task $j$.
-The solver finds the values of every $x_{ij}$ and $s_j$ that minimize total uncovered hours
-while satisfying all constraints simultaneously.
-""")
