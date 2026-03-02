@@ -3,7 +3,7 @@ import streamlit as st
 import pandas as pd
 import pulp
 from openpyxl import Workbook
-from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.styles import Font, Alignment
 from openpyxl.utils import get_column_letter
 
 st.set_page_config(page_title="Workforce Optimizer", layout="wide")
@@ -23,37 +23,22 @@ REQUIRED_COLS = {
 
 
 # Build and return an in-memory blank Excel template (.xlsx bytes).
-# Each sheet gets header rows, two example rows, and a notes row.
+# Each sheet gets a bold header row, two example rows, and a notes row. No color styling.
 def build_blank_template() -> bytes:
-    NAVY  = PatternFill("solid", start_color="1F4E79")
-    BLUE  = PatternFill("solid", start_color="D9E1F2")
-    GREEN = PatternFill("solid", start_color="375623")
-    THIN  = Side(style="thin", color="BFBFBF")
-    BDR   = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
-
-    def hdr(cell, green=False):
-        cell.font      = Font(bold=True, color="FFFFFF", size=11)
-        cell.fill      = GREEN if green else NAVY
-        cell.alignment = Alignment(horizontal="center", vertical="center")
-        cell.border    = BDR
-
-    def ex(cell):
-        cell.fill      = BLUE
-        cell.alignment = Alignment(horizontal="left", vertical="center")
-        cell.border    = BDR
-
-    def note(cell):
-        cell.font      = Font(italic=True, color="595959", size=9)
-        cell.alignment = Alignment(horizontal="left")
-
     def write_sheet(ws, headers, rows, notes, widths):
+        # Header row — bold
         for c, h in enumerate(headers, 1):
-            hdr(ws.cell(1, c, h))
+            cell = ws.cell(1, c, h)
+            cell.font = Font(bold=True)
+            cell.alignment = Alignment(horizontal="center")
+        # Example data rows
         for r, row in enumerate(rows, 2):
             for c, v in enumerate(row, 1):
-                ex(ws.cell(r, c, v))
+                ws.cell(r, c, v)
+        # Notes row — italic, small
         for c, n in enumerate(notes, 1):
-            note(ws.cell(len(rows) + 2, c, n))
+            cell = ws.cell(len(rows) + 2, c, n)
+            cell.font = Font(italic=True, size=9)
         for i, w in enumerate(widths, 1):
             ws.column_dimensions[get_column_letter(i)].width = w
 
@@ -102,10 +87,10 @@ def build_blank_template() -> bytes:
         ("Tasks",     "Urgency",         "Optional", "Not used by optimizer"),
     ]
     for c, h in enumerate(dict_headers, 1):
-        hdr(ws.cell(1, c, h), green=True)
+        ws.cell(1, c, h).font = Font(bold=True)
     for r, row in enumerate(dict_rows, 2):
         for c, v in enumerate(row, 1):
-            ws.cell(r, c, v).border = BDR
+            ws.cell(r, c, v)
     for i, w in enumerate([14, 18, 12, 50], 1):
         ws.column_dimensions[get_column_letter(i)].width = w
 
@@ -294,16 +279,16 @@ with st.sidebar:
         st.caption("Template download unavailable.")
 
     try:
-        with open("workforce_optimizer_guide.docx", "rb") as f:
+        with open("Capstone Budget Data.xlsx", "rb") as f:
             st.download_button(
-                "Download reference guide (.docx)",
+                "Download example dataset",
                 data=f.read(),
-                file_name="workforce_optimizer_guide.docx",
-                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                file_name="Capstone Budget Data.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True,
             )
     except Exception:
-        st.caption("Reference guide unavailable.")
+        st.caption("Example dataset unavailable.")
 
     st.divider()
     uploaded_file = st.file_uploader("Choose Excel file (.xlsx)", type=["xlsx"])
