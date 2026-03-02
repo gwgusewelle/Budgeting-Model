@@ -7,6 +7,19 @@ import pulp
 # Set the browser tab title, icon, and use full-width layout
 st.set_page_config(page_title="Workforce Optimizer", page_icon="⚡", layout="wide")
 
+# ─── SIDEBAR WIDTH ────────────────────────────────────────────────────────────
+# Streamlit's default sidebar max-width is ~350px which clips longer labels.
+# This CSS override bumps it to 420px and lets it resize freely up to that point.
+st.markdown(
+    """
+    <style>
+        [data-testid="stSidebar"] { min-width: 320px; max-width: 420px; }
+        [data-testid="stSidebar"] .stFileUploader { width: 100%; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 
 # ─── CONSTANTS ────────────────────────────────────────────────────────────────
 # Emoji color indicators for each skill type used in display throughout the UI
@@ -17,6 +30,135 @@ SKILL_COLORS = {"A": "🟠", "B": "🔵", "C": "🟢", "D": "🟣", "E": "🔴"}
 REQUIRED_EMPLOYEE_COLS = {"employee", "capacity", "skills", "hourly_rate ($)"}
 REQUIRED_PROJECT_COLS  = {"project", "reimbursable", "max_total", "budget ($)"}
 REQUIRED_TASK_COLS     = {"project", "task_id", "task_type", "min_hours"}
+
+
+# ─── BLANK TEMPLATE BUILDER ───────────────────────────────────────────────────
+# Generates an in-memory Excel file with the three required sheets pre-populated
+# with headers and one example row each, plus a Data Dictionary sheet.
+# Returns raw bytes so Streamlit can serve it as a download without touching disk.
+def build_blank_template() -> bytes:
+    import io
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    from openpyxl.utils import get_column_letter
+
+    wb = Workbook()
+
+    # ── color palette ──
+    HEADER_FILL  = PatternFill("solid", start_color="1F4E79")   # dark navy
+    EXAMPLE_FILL = PatternFill("solid", start_color="D9E1F2")   # light blue tint
+    DICT_FILL    = PatternFill("solid", start_color="375623")    # dark green
+    THIN = Side(style="thin", color="BFBFBF")
+    BORDER = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
+
+    def style_header(cell, green=False):
+        cell.font      = Font(bold=True, color="FFFFFF", size=11)
+        cell.fill      = DICT_FILL if green else HEADER_FILL
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+        cell.border    = BORDER
+
+    def style_example(cell):
+        cell.fill      = EXAMPLE_FILL
+        cell.alignment = Alignment(horizontal="left", vertical="center")
+        cell.border    = BORDER
+
+    def style_note(cell):
+        cell.font      = Font(italic=True, color="595959", size=9)
+        cell.alignment = Alignment(horizontal="left")
+
+    def set_col_widths(ws, widths):
+        for col, w in enumerate(widths, 1):
+            ws.column_dimensions[get_column_letter(col)].width = w
+
+    # ── Employees sheet ──
+    ws_emp = wb.active
+    ws_emp.title = "Employees"
+    emp_headers  = ["employee", "capacity", "skills", "hourly_rate ($)", "employee_type"]
+    emp_example  = ["E001", 40, "A,B", 67.50, "Senior"]
+    emp_example2 = ["E002", 30, "B,C,D", 55.00, "Mid-Level"]
+    for c, h in enumerate(emp_headers, 1):
+        style_header(ws_emp.cell(1, c, h))
+    for c, v in enumerate(emp_example, 1):
+        style_example(ws_emp.cell(2, c, v))
+    for c, v in enumerate(emp_example2, 1):
+        style_example(ws_emp.cell(3, c, v))
+    # note row
+    notes = ["Unique ID (e.g. E001)", "Max hrs/week (integer)",
+             "Comma-separated A-E", "Hourly billing rate ($)", "Junior / Mid-Level / Senior"]
+    for c, n in enumerate(notes, 1):
+        style_note(ws_emp.cell(4, c, n))
+    set_col_widths(ws_emp, [16, 14, 18, 18, 16])
+    ws_emp.row_dimensions[1].height = 20
+
+    # ── Projects sheet ──
+    ws_proj = wb.create_sheet("Projects")
+    proj_headers  = ["project", "reimbursable", "max_total", "budget ($)"]
+    proj_example  = ["P001", True, 90, 12000]
+    proj_example2 = ["P002", False, None, 8500]
+    for c, h in enumerate(proj_headers, 1):
+        style_header(ws_proj.cell(1, c, h))
+    for c, v in enumerate(proj_example, 1):
+        style_example(ws_proj.cell(2, c, v))
+    for c, v in enumerate(proj_example2, 1):
+        style_example(ws_proj.cell(3, c, v))
+    notes_p = ["Unique ID (e.g. P001)", "TRUE = client-billable, FALSE = internal",
+               "Max hours cap (leave blank if not reimbursable)", "Total dollar budget ($)"]
+    for c, n in enumerate(notes_p, 1):
+        style_note(ws_proj.cell(4, c, n))
+    set_col_widths(ws_proj, [16, 16, 14, 14])
+    ws_proj.row_dimensions[1].height = 20
+
+    # ── Tasks sheet ──
+    ws_task = wb.create_sheet("Tasks")
+    task_headers  = ["project", "task_id", "task_type", "min_hours", "Urgency"]
+    task_example  = ["P001", "T001", "A", 10, None]
+    task_example2 = ["P001", "T002", "B", 14, None]
+    for c, h in enumerate(task_headers, 1):
+        style_header(ws_task.cell(1, c, h))
+    for c, v in enumerate(task_example, 1):
+        style_example(ws_task.cell(2, c, v))
+    for c, v in enumerate(task_example2, 1):
+        style_example(ws_task.cell(3, c, v))
+    notes_t = ["Must match a project ID", "Unique task ID (e.g. T001)",
+               "Skill type required (A / B / C / D / E)", "Minimum hours to complete", "Optional — leave blank"]
+    for c, n in enumerate(notes_t, 1):
+        style_note(ws_task.cell(4, c, n))
+    set_col_widths(ws_task, [14, 14, 14, 14, 12])
+    ws_task.row_dimensions[1].height = 20
+
+    # ── Data Dictionary sheet ──
+    ws_dict = wb.create_sheet("Data Dictionary")
+    dict_headers = ["Sheet", "Column", "Type", "Description"]
+    dict_rows = [
+        ("Employees", "employee",       "ID",        "Unique employee identifier (e.g. E001)"),
+        ("Employees", "capacity",       "Integer",   "Max weekly hours available"),
+        ("Employees", "skills",         "String",    "Comma-separated skill types (A-E)"),
+        ("Employees", "hourly_rate ($)","Float ($)",  "Hourly billing/wage rate"),
+        ("Employees", "employee_type",  "Category",  "Junior (<25 h), Mid-Level (25-39 h), Senior (40+ h)"),
+        ("Projects",  "project",        "ID",        "Unique project identifier (e.g. P001)"),
+        ("Projects",  "reimbursable",   "Boolean",   "TRUE = client-billable; FALSE = internal/overhead"),
+        ("Projects",  "max_total",      "Integer",   "Max hours budget for reimbursable projects (blank = no cap)"),
+        ("Projects",  "budget ($)",     "Float ($)",  "Total dollar budget. LP uses this as a wage cost ceiling."),
+        ("Tasks",     "project",        "ID",        "Project this task belongs to"),
+        ("Tasks",     "task_id",        "ID",        "Unique task identifier (e.g. T001)"),
+        ("Tasks",     "task_type",      "Category",  "Required skill type (A / B / C / D / E)"),
+        ("Tasks",     "min_hours",      "Integer",   "Minimum hours required to complete task"),
+        ("Tasks",     "Urgency",        "Optional",  "Not used by optimizer — reserved for future use"),
+    ]
+    for c, h in enumerate(dict_headers, 1):
+        style_header(ws_dict.cell(1, c, h), green=True)
+    for r, row in enumerate(dict_rows, 2):
+        for c, v in enumerate(row, 1):
+            cell        = ws_dict.cell(r, c, v)
+            cell.border = BORDER
+            cell.alignment = Alignment(horizontal="left", vertical="center")
+    set_col_widths(ws_dict, [14, 18, 12, 52])
+    ws_dict.row_dimensions[1].height = 20
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf.read()
 
 
 # ─── TEMPLATE VALIDATION ──────────────────────────────────────────────────────
@@ -474,9 +616,25 @@ st.caption("Upload your budget data template to run the optimizer.")
 with st.sidebar:
     st.header("📂 Data Import")
     st.markdown(
-        "Upload an Excel file with three sheets: **Employees**, **Projects**, and **Tasks**. "
-        "Download the template for the expected column format."
+        "Upload an Excel file with three sheets: **Employees**, **Projects**, and **Tasks**."
     )
+
+    # ── Downloadable blank template ──
+    # Build the template fresh each session so the download is always current.
+    # Wrapped in a try so a packaging issue never blocks the upload flow.
+    try:
+        template_bytes = build_blank_template()
+        st.download_button(
+            label="⬇ Download blank template",
+            data=template_bytes,
+            file_name="workforce_optimizer_template.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+        )
+    except Exception:
+        st.caption("Template download unavailable — openpyxl may not be installed.")
+
+    st.divider()
 
     uploaded_file = st.file_uploader(
         label="Choose Excel file (.xlsx)",
