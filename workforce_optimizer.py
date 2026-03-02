@@ -642,19 +642,6 @@ with st.sidebar:
         help="File must contain sheets: Employees, Projects, Tasks",
     )
 
-    # Show column requirements so the user knows what to include
-    with st.expander("📋 Required columns"):
-        st.markdown("**Employees sheet**")
-        st.code("employee | capacity | skills | hourly_rate ($) | employee_type")
-        st.markdown("**Projects sheet**")
-        st.code("project | reimbursable | max_total | budget ($)")
-        st.markdown("**Tasks sheet**")
-        st.code("project | task_id | task_type | min_hours")
-        st.caption(
-            "- `skills` should be comma-separated (e.g. A,B,C)\n"
-            "- `reimbursable` should be TRUE/FALSE\n"
-            "- `max_total` and `budget ($)` can be blank for non-reimbursable projects"
-        )
 
 
 # ─── GUARD: require upload before anything else runs ─────────────────────────
@@ -1178,3 +1165,127 @@ with tabs[6]:
                     )
     elif not absent_ids:
         st.caption("Select one or more absent employees above, then click Run Coverage Analysis.")
+
+
+# ─── BOTTOM OF PAGE: DATA REQUIREMENTS + METHODOLOGY ─────────────────────────
+# Shown below all tabs so it doesn't clutter the sidebar or the working area.
+# Both sections render as collapsed expanders by default.
+st.divider()
+
+# ── Data Requirements ──────────────────────────────────────────────────────────
+with st.expander("📋 Data requirements — click to expand"):
+    st.markdown("##### Employees sheet")
+    st.code("employee | capacity | skills | hourly_rate ($) | employee_type", language="text")
+    st.markdown("""
+| Column | Type | Notes |
+|--------|------|-------|
+| `employee` | Text | Unique ID, e.g. `E001` |
+| `capacity` | Integer | Max hours available per week |
+| `skills` | Text | Comma-separated skill types: `A`, `B`, `C`, `D`, or `E` — e.g. `A,B,C` |
+| `hourly_rate ($)` | Number | Billing/wage rate used in the budget constraint |
+| `employee_type` | Text | `Junior` / `Mid-Level` / `Senior` (display only) |
+""")
+    st.markdown("##### Projects sheet")
+    st.code("project | reimbursable | max_total | budget ($)", language="text")
+    st.markdown("""
+| Column | Type | Notes |
+|--------|------|-------|
+| `project` | Text | Unique ID, e.g. `P001` |
+| `reimbursable` | Boolean | `TRUE` = client-billable (gets higher optimization priority); `FALSE` = internal |
+| `max_total` | Integer | Hard cap on total hours billed. Leave blank for non-reimbursable projects. |
+| `budget ($)` | Number | Dollar ceiling. The optimizer will not assign more wage cost than this. |
+""")
+    st.markdown("##### Tasks sheet")
+    st.code("project | task_id | task_type | min_hours", language="text")
+    st.markdown("""
+| Column | Type | Notes |
+|--------|------|-------|
+| `project` | Text | Must exactly match a project ID in the Projects sheet |
+| `task_id` | Text | Unique task ID, e.g. `T001` |
+| `task_type` | Text | The skill required to perform this task (`A` / `B` / `C` / `D` / `E`) |
+| `min_hours` | Integer | Minimum hours the optimizer must try to cover |
+""")
+
+
+# ── Model Methodology ──────────────────────────────────────────────────────────
+with st.expander("📐 Model methodology — click to expand"):
+    st.markdown("#### What this optimizer is doing, in plain terms")
+    st.markdown("""
+The optimizer is solving a **Linear Programming (LP)** problem — a mathematical technique that
+finds the best possible answer to a resource allocation problem given a set of hard rules (constraints).
+
+**In plain terms:** it's trying to assign every task to the right employee in a way that covers as
+many hours as possible, without exceeding any employee's weekly availability, any project's hour cap,
+or any project's dollar budget. Reimbursable (client-billable) tasks are treated as higher priority
+than internal ones.
+
+Think of it like a scheduling puzzle: the optimizer is testing millions of possible combinations
+simultaneously and picking the one that leaves the fewest uncovered hours, while respecting every
+constraint at once.
+""")
+
+    st.markdown("#### The four rules (constraints)")
+    st.markdown("""
+**1. Employee capacity** — No employee can be assigned more hours than their stated weekly capacity.
+If someone has 35 hours available, the model will never try to give them 36.
+
+**2. Task demand** — Every task has a minimum number of hours it needs. The model tries to meet that
+minimum. If it can't (due to budget or skill gaps), it records the shortfall rather than pretending
+the task is covered.
+
+**3. Skill matching** — An employee can only be assigned to a task if they hold the required skill
+type. A Skill B task cannot be assigned to someone who only has Skills C and D.
+
+**4. Project budget ceiling** — For each project, the total wage cost of all hours assigned
+(hours × each employee's hourly rate) cannot exceed the project's dollar budget. This is the key
+financial constraint that links headcount decisions to real dollars.
+
+For reimbursable projects there is also a **project hour cap** (`max_total`) — a separate ceiling
+on the raw number of billable hours regardless of cost.
+""")
+
+    st.markdown("#### The objective — what the model is maximizing")
+    st.markdown("""
+The optimizer minimizes **uncovered (slack) hours** across all tasks, with reimbursable tasks
+weighted twice as heavily as internal tasks. This means when capacity is tight and trade-offs must
+be made, client-facing work is always covered first.
+""")
+
+    st.markdown("#### Equations")
+    st.latex(r"""
+\text{Minimize} \quad \sum_{j} w_j \cdot s_j
+""")
+    st.markdown("""where:
+- $j$ = a task
+- $s_j$ = uncovered (slack) hours for task $j$ — how many hours the model couldn't fill
+- $w_j = 2$ if the task belongs to a reimbursable project, $w_j = 1$ otherwise
+""")
+
+    st.latex(r"""
+\text{Subject to:}
+""")
+    st.markdown("**Employee capacity constraint** — for each employee $i$:")
+    st.latex(r"""
+\sum_{j} x_{ij} \leq \text{capacity}_i
+""")
+    st.markdown("**Task demand constraint** — for each task $j$:")
+    st.latex(r"""
+\sum_{i} x_{ij} + s_j \geq \text{minHours}_j
+""")
+    st.markdown("**Project hour cap** — for each reimbursable project $p$:")
+    st.latex(r"""
+\sum_{j \in p} \sum_{i} x_{ij} \leq \text{maxTotal}_p
+""")
+    st.markdown("**Project dollar budget** — for each project $p$:")
+    st.latex(r"""
+\sum_{j \in p} \sum_{i} x_{ij} \cdot \text{rate}_i \leq \text{budget}_p
+""")
+    st.markdown("**Skill matching and non-negativity:**")
+    st.latex(r"""
+x_{ij} = 0 \quad \text{if employee } i \text{ lacks the skill for task } j, \qquad x_{ij} \geq 0, \quad s_j \geq 0
+""")
+    st.markdown("""
+where $x_{ij}$ is the number of hours employee $i$ is assigned to task $j$.
+The solver finds the values of every $x_{ij}$ and $s_j$ that minimize total uncovered hours
+while satisfying all constraints simultaneously.
+""")
