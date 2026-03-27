@@ -6,6 +6,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Font, Alignment
 from openpyxl.utils import get_column_letter
 
+#Title/markdown
 st.set_page_config(page_title="Workforce Optimizer", layout="wide")
 
 st.markdown(
@@ -19,12 +20,12 @@ EXPECTED_SCHEMA = {
     "Tasks":     {"project", "task_id", "task_type", "min_hours"},
 }
 
-
+#Creates excel Template using workbork
 def create_template_workbook() -> bytes:
     wb = Workbook()
 
     def populate_sheet(ws, column_headers, sample_data, column_notes, col_widths):
-        for col_idx, header in enumerate(column_headers, start=1):
+        for col_idx,   header in enumerate(column_headers, start=1):
             cell = ws.cell(row=1, column=col_idx, value=header)
             cell.font = Font(bold=True)
             cell.alignment = Alignment(horizontal="center")
@@ -33,10 +34,10 @@ def create_template_workbook() -> bytes:
                 ws.cell(row=row_idx, column=col_idx, value=value)
         note_row = len(sample_data) + 2
         for col_idx, note in enumerate(column_notes, start=1):
-            cell = ws.cell(row=note_row, column=col_idx, value=note)
-            cell.font = Font(italic=True, size=9)
+            cell = ws.cell(row=note_row, column=col_idx,  value=note)
+            cell.font =   Font(italic=True, size=9)
         for col_idx, width in enumerate(col_widths, start=1):
-            ws.column_dimensions[get_column_letter(col_idx)].width = width
+            ws.column_dimensions[get_column_letter(col_idx)].width = width  
 
     employees_ws = wb.active
     employees_ws.title = "Employees"
@@ -66,38 +67,12 @@ def create_template_workbook() -> bytes:
         [14, 14, 14, 14, 12],
     )
 
-    dict_ws = wb.create_sheet("Data Dictionary")
-    dictionary_headers = ["Sheet", "Column", "Type", "Description"]
-    dictionary_entries = [
-        ("Employees", "employee",        "ID",       "Unique employee identifier"),
-        ("Employees", "capacity",        "Integer",  "Max weekly hours available"),
-        ("Employees", "skills",          "String",   "Comma-separated skill types A-E"),
-        ("Employees", "hourly_rate ($)", "Float",    "Hourly billing/wage rate"),
-        ("Employees", "employee_type",   "Category", "Junior / Mid-Level / Senior"),
-        ("Projects",  "project",         "ID",       "Unique project identifier"),
-        ("Projects",  "reimbursable",    "Boolean",  "TRUE = client-billable"),
-        ("Projects",  "max_total",       "Integer",  "Max hours cap (blank if non-reimbursable)"),
-        ("Projects",  "budget ($)",      "Float",    "Dollar budget ceiling for wage costs"),
-        ("Tasks",     "project",         "ID",       "Must match a project ID"),
-        ("Tasks",     "task_id",         "ID",       "Unique task identifier"),
-        ("Tasks",     "task_type",       "Category", "Required skill type (A-E)"),
-        ("Tasks",     "min_hours",       "Integer",  "Minimum hours to complete task"),
-        ("Tasks",     "Urgency",         "Optional", "Not used by optimizer"),
-    ]
-    for col_idx, header in enumerate(dictionary_headers, start=1):
-        dict_ws.cell(row=1, column=col_idx, value=header).font = Font(bold=True)
-    for row_idx, entry in enumerate(dictionary_entries, start=2):
-        for col_idx, value in enumerate(entry, start=1):
-            dict_ws.cell(row=row_idx, column=col_idx, value=value)
-    for col_idx, width in enumerate([14, 18, 12, 50], start=1):
-        dict_ws.column_dimensions[get_column_letter(col_idx)].width = width
-
     buffer = io.BytesIO()
     wb.save(buffer)
     buffer.seek(0)
     return buffer.read()
 
-
+#data Validation part
 def check_template_validity(excel_file):
     required_sheets = set(EXPECTED_SCHEMA.keys())
     available_sheets = set(excel_file.sheet_names)
